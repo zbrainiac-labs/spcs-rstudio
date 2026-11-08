@@ -63,10 +63,20 @@ for arg in "$@"; do
     --container)
       echo "== container: structure test =="
       build_runtime
-      docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-        -v "$PWD/tests/container:/tests:ro" \
-        gcr.io/gcp-runtimes/container-structure-test:latest \
-        test --image "$IMAGE" --config /tests/structure.yaml
+      # native binary (the gcr.io image is amd64-only -> exec format error on arm64)
+      CST_VERSION=v1.22.1
+      CST_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+      case "$(uname -m)" in x86_64|amd64) CST_ARCH=amd64 ;; *) CST_ARCH=arm64 ;; esac
+      CST_BIN="${TMPDIR:-/tmp}/container-structure-test-$CST_VERSION-$CST_OS-$CST_ARCH"
+      if [[ ! -x "$CST_BIN" ]]; then
+        CST_URL=https://github.com/GoogleContainerTools/container-structure-test/releases/download/$CST_VERSION
+        curl -fsSL -o "$CST_BIN" "$CST_URL/container-structure-test-$CST_OS-$CST_ARCH"
+        CST_SUM=$(curl -fsSL "$CST_URL/checksums.txt" | awk -v f="container-structure-test-$CST_OS-$CST_ARCH" '$2==f {print $1}')
+        echo "$CST_SUM  $CST_BIN" | { sha256sum -c - 2>/dev/null || shasum -a 256 -c -; } >/dev/null \
+          || { rm -f "$CST_BIN"; echo "checksum mismatch for container-structure-test"; exit 1; }
+        chmod +x "$CST_BIN"
+      fi
+      "$CST_BIN" test --image "$IMAGE" --config tests/container/structure.yaml
       ;;
     --smoke)
       echo "== smoke: runtime =="
