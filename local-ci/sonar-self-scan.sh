@@ -129,7 +129,8 @@ SCAN='
     -Dsonar.working.directory="$WORK/.scannerwork" -Dsonar.qualitygate.wait=true \
     >"$WORK/scanner.log" 2>&1 || RC=$?
   grep -E "ERROR|WARN.*(coverage|external)|ANALYSIS SUCCESSFUL|QUALITY GATE|EXECUTION" "$WORK/scanner.log" || true
-  q() { curl -sf -u "$SONAR_TOKEN:" "$H/api/issues/search?componentKeys=$KEY&issueStatuses=OPEN,CONFIRMED&ps=500&$1"; }
+  # token is an env var from /sonar/.sonar_env, not a secret in git (.gitleaksignore)
+  q() { curl -sf -u "$SONAR_TOKEN:" "$H/api/issues/search?componentKeys=$KEY&issueStatuses=OPEN,CONFIRMED&ps=500&$1"; } # gitleaks:allow
   ALL=$(q "")
   echo "Open issues (all severities): $(jq .total <<<"$ALL")"
   jq -r ".issues[] | [(.impacts|map(.severity)|join(\"/\")) + \"|\" + .severity, .rule,
@@ -140,8 +141,8 @@ SCAN='
   COUNT=$(jq length <<<"$ISSUES")
   echo "HIGH/BLOCKER/CRITICAL issues: $COUNT"
   # informational: the shared sonar-init token may lack hotspot browse permission (403)
-  HOT=$(curl -sf -u "$SONAR_TOKEN:" "$H/api/hotspots/search?project=$KEY&status=TO_REVIEW&ps=500" \
-    | jq .paging.total 2>/dev/null || echo "n/a (token cannot read hotspots)")
+  HOT_JSON=$(curl -sf -u "$SONAR_TOKEN:" "$H/api/hotspots/search?project=$KEY&status=TO_REVIEW&ps=500" || true) # gitleaks:allow
+  HOT=$(jq -e .paging.total <<<"$HOT_JSON" 2>/dev/null || echo "n/a (token cannot read hotspots)")
   echo "Security hotspots to review: $HOT"
   [[ "$RC" -eq 0 ]] || { echo "sonar-scanner or quality gate failed (exit $RC)"; tail -n 20 "$WORK/scanner.log"; exit "$RC"; }
   [[ "$COUNT" -eq 0 ]]
