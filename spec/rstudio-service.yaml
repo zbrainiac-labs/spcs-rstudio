@@ -1,0 +1,35 @@
+# SPCS service specification for RSTUDIO_SERVICE.
+# Placeholders replaced at deploy time (scripts/render-spec.sh):
+#   ${IMAGE_TAG}             immutable tag (sha-<short>); never :latest
+#   ${RSTUDIO_ALLOWED_USER}  the one Snowflake user admitted (RStudio OSS is single-user)
+# Owner role RSTUDIO_RUNTIME; R runs with restricted caller's rights as the
+# signed-in user (see R/connect.R, sql/admin/00_setup_roles.sql). No secrets here.
+spec:
+  containers:
+  - name: rstudio
+    image: /R_SPCS_DB/PUBLIC/RSTUDIO_REPO/rstudio-spcs:${IMAGE_TAG}
+    env:
+      # RStudio's own login is disabled; access is gated by the SPCS public
+      # endpoint (Snowflake sign-in) and nginx admits only RSTUDIO_ALLOWED_USER.
+      DISABLE_AUTH: "true"
+      RSTUDIO_ALLOWED_USER: "${RSTUDIO_ALLOWED_USER}"
+    resources:
+      # request leaves room on the 1-vCPU GEN_ARM_G1_2 node for short job services
+      # (integration test); the limit still lets RStudio use the whole node
+      requests:
+        memory: 2Gi
+        cpu: 500m
+      limits:
+        memory: 4Gi
+        cpu: 2000m
+    readinessProbe:
+      port: 8787
+      # must return HTTP 200; "/" is a 302 (see docker/nginx/rstudio.conf.template)
+      path: /healthz
+  endpoints:
+  - name: rstudio
+    port: 8787
+    public: true
+capabilities:
+  securityContext:
+    executeAsCaller: true

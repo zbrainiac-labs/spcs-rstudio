@@ -1,1 +1,53 @@
+# Secrets and credentials
 .secrets
+.env
+*.env
+!*.env.example
+config.toml
+connections.toml
+*.p8
+*.pem
+*.key
+
+# R / RStudio
+.Rhistory
+.RData
+.Rapp.history
+.Ruserdata
+.Rproj.user/
+*.Rproj
+*.rds
+
+# Test & coverage output
+tests/testthat/_snaps/
+coverage/
+coverage.xml
+sonar-coverage.xml
+
+# SonarQube / scanners
+.scannerwork/
+.sonar/
+.sonar-issues.tsv
+trivy-report*.json
+gitleaks-report*.json
+
+# Local CI (act)
+local-ci/logs/
+local-ci/event.json
+local-ci/*.secrets
+local-ci/*.env
+
+# Python tooling (sqlfluff venv)
+.venv/
+__pycache__/
+
+# Cortex Code local state
+.snowflake/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

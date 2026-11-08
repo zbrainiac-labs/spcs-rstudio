@@ -1,0 +1,7 @@
+# Keep the build context minimal
+*
+!R/
+!docker/
+!tests/testthat/
+!tests/lint_r.R
+!.lintr

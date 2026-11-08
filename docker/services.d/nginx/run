@@ -1,0 +1,22 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+# s6 service: render the nginx config and run nginx in the foreground.
+set -euo pipefail
+
+ALLOWED_USER="${RSTUDIO_ALLOWED_USER:-}"
+# the value is substituted into nginx config: allow identifier characters only
+if [[ -n "$ALLOWED_USER" && ! "$ALLOWED_USER" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+  echo "Invalid RSTUDIO_ALLOWED_USER '${ALLOWED_USER}'" >&2
+  exit 1
+fi
+# unset in SPCS means nobody with a Snowflake identity is admitted
+export ALLOWED_USER="${ALLOWED_USER:-__no_user_configured__}"
+
+install -d -m 0750 -o root -g rstudio /run/sf-caller
+touch /run/sf-caller/token.log
+chown root:rstudio /run/sf-caller/token.log
+chmod 0640 /run/sf-caller/token.log
+
+envsubst '${ALLOWED_USER}' < /etc/nginx/templates/rstudio.conf.template > /etc/nginx/conf.d/rstudio.conf
+nginx -t -q
+exec nginx -g 'daemon off;'

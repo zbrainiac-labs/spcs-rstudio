@@ -1,0 +1,5 @@
+# Reviewed gitleaks false positives (commit:file:rule:line).
+# local-ci/sonar-self-scan.sh: `curl -u "$SONAR_TOKEN:"` passes an environment
+# variable (read from the runner's /sonar volume at run time); no secret in git.
+3242ee7649b13f5b236e784ae232c6a4969db504:local-ci/sonar-self-scan.sh:curl-auth-user:132
+3242ee7649b13f5b236e784ae232c6a4969db504:local-ci/sonar-self-scan.sh:curl-auth-user:143

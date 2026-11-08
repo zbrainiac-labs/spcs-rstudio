@@ -1,0 +1,4 @@
+# DS-0002 (no non-root USER): rocker/rstudio's s6-overlay /init must start as
+# root (PID 1); RStudio's rserver drops to a non-root service user and sessions
+# run as "rstudio". Verified by tests/smoke.sh ("rserver runs as non-root user").
+DS-0002

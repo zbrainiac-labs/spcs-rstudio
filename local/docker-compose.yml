@@ -1,0 +1,17 @@
+# Local run of the RStudio image (see local/start.sh).
+# Bound to 127.0.0.1 only because RStudio auth is disabled.
+services:
+  rstudio:
+    build:
+      context: ..
+    image: spcs-rstudio:local
+    # native platform by default (arm64 on Apple Silicon); override via PLATFORM
+    platform: ${PLATFORM:-linux/arm64}
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      DISABLE_AUTH: "true"
+    # Optional PAT credentials for Snowflake (SNOWFLAKE_HOST/USER/TOKEN)
+    env_file:
+      - path: ../.secrets
+        required: false
