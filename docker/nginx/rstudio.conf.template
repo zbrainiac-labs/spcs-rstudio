@@ -1,0 +1,58 @@
+# nginx in front of RStudio Server (rendered by docker/services.d/nginx/run).
+#
+# SPCS caller's rights: SPCS adds Sf-Context-Current-User and
+# Sf-Context-Current-User-Token to every ingress request. RStudio open source
+# is single-user, so only ${ALLOWED_USER} may use this service; the latest
+# caller token is kept for R (R/connect.R) in /run/sf-caller/token.log,
+# readable by the rstudio user only.
+# Requests without the header (local runs, SPCS readiness probe) are allowed.
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+map $http_sf_context_current_user $rstudio_denied {
+    ""                     0;
+    "~*^${ALLOWED_USER}$"  0;
+    default                1;
+}
+
+map $http_sf_context_current_user_token $has_caller_token {
+    ""      0;
+    default 1;
+}
+
+log_format caller_token '$http_sf_context_current_user_token';
+
+server {
+    listen 8787 default_server;
+
+    # only the caller token is logged (this replaces the default access log)
+    access_log /run/sf-caller/token.log caller_token if=$has_caller_token;
+
+    # readiness/health: SPCS probes need HTTP 200, but RStudio answers "/" with a
+    # 302 for non-browser clients. 200 only when RStudio is up (502 otherwise).
+    location = /healthz {
+        proxy_pass http://127.0.0.1:8788/unsupported_browser.htm;
+        proxy_set_header Sf-Context-Current-User-Token "";
+    }
+
+    location / {
+        if ($rstudio_denied) {
+            return 403 "This RStudio service is reserved for ${ALLOWED_USER}.\n";
+        }
+
+        proxy_pass http://127.0.0.1:8788;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # the caller token is for R only; do not pass it on to RStudio
+        proxy_set_header Sf-Context-Current-User-Token "";
+        proxy_read_timeout 1d;
+        proxy_buffering off;
+        client_max_body_size 0;
+    }
+}

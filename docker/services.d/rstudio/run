@@ -1,0 +1,15 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+# s6 service: RStudio Server behind nginx (docker/nginx/rstudio.conf.template).
+# Replaces rocker's run script; the address/port are passed as flags because
+# rocker's cont-init (02_userconf) rewrites /etc/rstudio/rserver.conf at start.
+
+## load /etc/environment vars first (as rocker does), without the quotes
+while IFS='=' read -r key value; do
+  [[ -z "$key" || "$key" == \#* ]] && continue
+  value="${value%\"}"
+  export "$key=${value#\"}"
+done < /etc/environment
+
+exec /usr/lib/rstudio-server/bin/rserver --server-daemonize 0 \
+  --www-address=127.0.0.1 --www-port=8788

@@ -8,10 +8,10 @@ cat("=== RStudio on SPCS Test ===\n")
 cat("R Version:", R.version.string, "\n")
 cat("Working Directory:", getwd(), "\n\n")
 
-# Create sample data frame (mirrors SAMPLE_DATA table in Snowflake)
+# Sample data frame with the same shape as the RST_SAMPLE_DATA sample rows
 sample_data <- data.frame(
   id = 1:8,
-  category = c('A', 'B', 'A', 'C', 'B', 'A', 'C', 'B'),
+  category = c("A", "B", "A", "C", "B", "A", "C", "B"),
   value = c(10.5, 20.3, 15.2, 8.7, 22.1, 12.9, 9.4, 18.6)
 )
 
@@ -20,8 +20,8 @@ cat("Sample Data:\n")
 print(sample_data)
 
 cat("\nSummary Statistics by Category:\n")
-summary_stats <- sample_data %>%
-  group_by(category) %>%
+summary_stats <- sample_data |>
+  group_by(category) |>
   summarize(
     count = n(),
     mean_value = mean(value),

@@ -1,0 +1,336 @@
+name: CI / Deploy
+
+# One workflow for checks, image and SPCS deployment. Runs 1:1 on GitHub and
+# locally under act (bash local-ci/act.sh); github.event.act is only set by act.
+#   lint         actionlint + ShellCheck + hadolint
+#   test         spec checks + R unit tests (testthat, covr, lintr) in the test image
+#   sonar        Trivy fs, gitleaks, SQLFluff, SonarQube gate (local-ci/sonar-self-scan.sh)
+#   image        native arm64: build, structure test, smoke test, Trivy image scan;
+#                on main the tested image is pushed by digest with SBOM +
+#                provenance attestations
+#   publish      manifest ghcr.io/zbrainiac-labs/spcs-rstudio:{sha-<short>,latest} (arm64)
+#   deploy-spcs  push the tested arm64 image to RSTUDIO_REPO and update RSTUDIO_SERVICE
+#                (main only, OIDC; act: dry run with PAT auth, --full deploys)
+#   verify-spcs  SPCS integration test (service READY, tag, endpoint, R job via OAuth)
+# Pull requests run lint, test, sonar and image only.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # never cancel a running deploy or image push on main
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE_NAME: ghcr.io/zbrainiac-labs/spcs-rstudio
+  TRIVY_VERSION: 0.76.2
+  SNOWFLAKE_ACCOUNT: SFSEEUROPE-DEMO_MDAEPPEN
+  # the one Snowflake user admitted to RStudio (single-user service)
+  RSTUDIO_ALLOWED_USER: ${{ vars.RSTUDIO_ALLOWED_USER || 'MDAEPPEN' }}
+  # push / publish only for real runs on main (never for PRs or act)
+  RELEASE_RUN: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && !github.event.act }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install actionlint + ShellCheck + hadolint
+        run: |
+          set -Eeuo pipefail
+          case "$(uname -m)" in x86_64) A=amd64; S=x86_64 ;; aarch64|arm64) A=arm64; S=aarch64 ;; esac
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sfL "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_${A}.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin" actionlint
+          curl -sfL "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.${S}.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP/bin" --strip-components=1 shellcheck-v0.11.0/shellcheck
+          curl -sfL -o "$RUNNER_TEMP/bin/hadolint" "https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-linux-${S/aarch64/arm64}"
+          chmod +x "$RUNNER_TEMP/bin/hadolint"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: actionlint
+        run: actionlint -color=false -shellcheck=
+      - name: ShellCheck
+        run: git ls-files -z '*.sh' 'docker/services.d/*/run' | xargs -0 shellcheck --severity=warning
+      - name: hadolint
+        run: hadolint --failure-threshold warning Dockerfile
+
+  test:
+    needs: lint
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install PyYAML (spec checks)
+        run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --user --break-system-packages pyyaml
+      - name: Spec checks + R unit tests (coverage, lintr)
+        env:
+          PLATFORM: linux/arm64
+        run: tests/run_all.sh --static --unit
+      - name: Upload coverage + lintr report
+        # act: jobs share the working copy (act.sh --bind), no artifact server needed
+        if: ${{ !github.event.act }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: error
+          retention-days: 1
+
+  sonar:
+    needs: test
+    # DataOpsBackbone runners: on sonarnet with the sonar-init token at /sonar
+    runs-on: self-hosted
+    timeout-minutes: 20
+    env:
+      # Community Build has no branch analysis, so one project key per stream:
+      # main on GitHub = the official record, PRs and local / act runs stay out of it
+      SONAR_PROJECT_KEY: >-
+        ${{ github.event_name == 'pull_request' && 'spcs-rstudio-local-pr'
+        || (github.ref == 'refs/heads/main' && !github.event.act) && 'spcs-rstudio'
+        || 'spcs-rstudio-local' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0  # SCM blame for new-code detection, gitleaks history scan
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        if: ${{ !github.event.act }}
+        with:
+          name: coverage
+          path: coverage
+      - name: Trivy + gitleaks + linters + SonarQube quality gate
+        run: bash local-ci/sonar-self-scan.sh
+      - name: Upload issue list
+        if: ${{ always() && !github.event.act }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: sonar-issues
+          path: .sonar-issues.tsv
+          if-no-files-found: ignore
+
+  # Each platform builds natively on its own runner (no QEMU on GitHub).
+  # arm64 is the SPCS target (RSTUDIO_POOL = GEN_ARM_G1_2).
+  image:
+    name: image (${{ matrix.platform.arch }})
+    needs: lint
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # arm64 only: SPCS (GEN_ARM_G1_*) and Apple Silicon; amd64 is not built in CI
+        platform:
+          - {name: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm}
+    env:
+      LOCAL_TAG: spcs-rstudio:ci-${{ matrix.platform.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          # act: build straight into the host daemon (no tar export of the ~4 GB image)
+          driver: ${{ github.event.act && 'docker' || 'docker-container' }}
+      - name: Build (${{ matrix.platform.name }})
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform.name }}
+          load: true
+          tags: ${{ env.LOCAL_TAG }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          # the GitHub Actions cache service only exists on GitHub
+          cache-from: ${{ !github.event.act && format('type=gha,scope=rstudio-{0}', matrix.platform.arch) || '' }}
+          cache-to: ${{ !github.event.act && format('type=gha,scope=rstudio-{0},mode=max', matrix.platform.arch) || '' }}
+      - name: Structure + smoke tests
+        env:
+          IMAGE: ${{ env.LOCAL_TAG }}
+          PLATFORM: ${{ matrix.platform.name }}
+          SKIP_BUILD: "1"
+        run: tests/run_all.sh --container --smoke
+      - name: Trivy image scan (HIGH/CRITICAL with a fix fails)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "aquasec/trivy:$TRIVY_VERSION" \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress "$LOCAL_TAG"
+      # ---- main only: push exactly the image that was scanned and tested ----
+      - name: Log in to GHCR
+        if: env.RELEASE_RUN == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push by digest
+        id: push
+        if: env.RELEASE_RUN == 'true'
+        run: |
+          set -Eeuo pipefail
+          tag="$IMAGE_NAME:sha-${GITHUB_SHA::7}-${{ matrix.platform.arch }}"
+          docker tag "$LOCAL_TAG" "$tag"
+          docker push -q "$tag"
+          digest=$(docker image inspect -f '{{index .RepoDigests 0}}' "$tag")
+          echo "digest=${digest#*@}" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/digests"
+          echo "${digest#*@}" > "$RUNNER_TEMP/digests/${{ matrix.platform.arch }}"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "aquasec/trivy:$TRIVY_VERSION" \
+            image --format cyclonedx --no-progress "$LOCAL_TAG" > "$RUNNER_TEMP/sbom.cdx.json"
+      - name: Attest provenance
+        if: env.RELEASE_RUN == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - name: Attest SBOM
+        if: env.RELEASE_RUN == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sbom.cdx.json
+          push-to-registry: true
+      - name: Upload digest
+        if: env.RELEASE_RUN == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: digest-${{ matrix.platform.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [sonar, image]
+    if: >-
+      !cancelled() && needs.sonar.result == 'success' && needs.image.result == 'success' &&
+      github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && !github.event.act
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -Eeuo pipefail
+          refs=()
+          for f in *; do refs+=("$IMAGE_NAME@$(cat "$f")"); done
+          docker buildx imagetools create -t "$IMAGE_NAME:sha-${GITHUB_SHA::7}" -t "$IMAGE_NAME:latest" "${refs[@]}"
+          docker buildx imagetools inspect "$IMAGE_NAME:sha-${GITHUB_SHA::7}"
+
+  deploy-spcs:
+    needs: [sonar, image]
+    if: >-
+      !cancelled() && needs.sonar.result == 'success' && needs.image.result == 'success' &&
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || github.event.act == true)
+    # DataOpsBackbone runner: snow CLI + docker; native arm64
+    runs-on: self-hosted
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      actions: read
+    env:
+      # act: no OIDC -> PAT (SNOW_CONFIG_B64); dry run unless local-ci/act.sh --full
+      DRY_RUN: ${{ github.event.act == true && github.event.full != true }}
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+      deployed: ${{ steps.deploy.outcome == 'success' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Image tag
+        id: tag
+        run: echo "image_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Render + check spec (dry run)
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+        run: |
+          set -Eeuo pipefail
+          tests/spec_check.sh
+          scripts/render-spec.sh
+      - name: Setup Snowflake connection
+        if: env.DRY_RUN != 'true'
+        uses: zbrainiac-labs/DataOpsBackbone/.github/actions/snowflake-connect@main
+        with:
+          use_oidc: ${{ github.event.act != true }}
+          snowflake_account: ${{ env.SNOWFLAKE_ACCOUNT }}
+          snow_config_b64: ${{ secrets.SNOW_CONFIG_B64 }}
+      - name: Download arm64 digest
+        if: env.DRY_RUN != 'true' && !github.event.act
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: digest-arm64
+          path: ${{ runner.temp }}/digest
+      - name: Log in to GHCR
+        if: env.DRY_RUN != 'true' && !github.event.act
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve tested arm64 image
+        if: env.DRY_RUN != 'true'
+        id: source
+        run: |
+          set -Eeuo pipefail
+          if [[ "${{ github.event.act == true }}" == "true" ]]; then
+            # act shares the host docker daemon: the image job's tested build
+            src="spcs-rstudio:ci-arm64"
+          else
+            src="$IMAGE_NAME@$(cat "$RUNNER_TEMP/digest/arm64")"
+            docker pull -q --platform linux/arm64 "$src"
+          fi
+          test "$(docker image inspect -f '{{.Architecture}}' "$src")" = "arm64"
+          echo "image=$src" >> "$GITHUB_OUTPUT"
+      - name: Deploy to SPCS
+        id: deploy
+        if: env.DRY_RUN != 'true'
+        env:
+          SOURCE_IMAGE: ${{ steps.source.outputs.image }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+        run: SNOW_CONNECTION="$CONNECTION_NAME" scripts/deploy.sh
+
+  verify-spcs:
+    needs: deploy-spcs
+    if: ${{ !cancelled() && needs.deploy-spcs.outputs.deployed == 'true' }}
+    runs-on: self-hosted
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Setup Snowflake connection
+        uses: zbrainiac-labs/DataOpsBackbone/.github/actions/snowflake-connect@main
+        with:
+          use_oidc: ${{ github.event.act != true }}
+          snowflake_account: ${{ env.SNOWFLAKE_ACCOUNT }}
+          snow_config_b64: ${{ secrets.SNOW_CONFIG_B64 }}
+      - name: SPCS integration test
+        env:
+          IMAGE_TAG: ${{ needs.deploy-spcs.outputs.image_tag }}
+        run: SNOW_CONNECTION="$CONNECTION_NAME" tests/run_all.sh --integration

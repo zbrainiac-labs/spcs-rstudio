@@ -1,0 +1,49 @@
+# container-structure-test config for the runtime image
+schemaVersion: 2.0.0
+
+metadataTest:
+  exposedPorts: ["8787"]
+  labels:
+    - key: org.opencontainers.image.source
+      value: https://github.com/zbrainiac-labs/spcs-rstudio
+
+fileExistenceTests:
+  - name: connect helper
+    path: /home/rstudio/connect.R
+    shouldExist: true
+    uid: 1000
+  - name: snowflake example
+    path: /home/rstudio/snowflake_test.R
+    shouldExist: true
+  - name: hello world example
+    path: /home/rstudio/helloworld.R
+    shouldExist: true
+  - name: no test tooling leaked into runtime
+    path: /src
+    shouldExist: false
+
+commandTests:
+  - name: libodbcinst.so.1 compat symlink (multiarch lib dir)
+    command: sh
+    args: ["-c", "test -e /usr/lib/$(uname -m)-linux-gnu/libodbcinst.so.1 && echo ok"]
+    expectedOutput: ["ok"]
+  - name: Snowflake ODBC driver library present
+    command: sh
+    args: ["-c", "test -f /usr/lib64/snowflake/odbc/lib/libsfodbc.so && echo ok"]
+    expectedOutput: ["ok"]
+  - name: Snowflake ODBC driver registered
+    command: odbcinst
+    args: ["-q", "-d"]
+    expectedOutput: ["\\[Snowflake ODBC\\]"]
+  - name: R packages load
+    command: Rscript
+    args: ["-e", "for (p in c('DBI','odbc','dplyr','dbplyr','ggplot2','tidyr')) library(p, character.only = TRUE); cat('ok')"]
+    expectedOutput: ["ok"]
+  - name: odbc sees Snowflake driver
+    command: Rscript
+    args: ["-e", "cat(any(grepl('Snowflake', odbc::odbcListDrivers()$name)))"]
+    expectedOutput: ["TRUE"]
+  - name: testthat not in runtime image
+    command: Rscript
+    args: ["-e", "cat(requireNamespace('testthat', quietly = TRUE))"]
+    expectedOutput: ["FALSE"]

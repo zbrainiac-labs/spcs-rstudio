@@ -1,0 +1,14 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+# s6 service: keep only the latest caller token in /run/sf-caller/token.log
+# (nginx appends one line per request). Truncate in place so nginx keeps writing.
+set -uo pipefail
+
+LOG=/run/sf-caller/token.log
+while true; do
+  sleep 300
+  if [[ -s "$LOG" ]]; then
+    LAST=$(tail -n 1 "$LOG")
+    printf '%s\n' "$LAST" > "$LOG"
+  fi
+done
