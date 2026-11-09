@@ -69,7 +69,19 @@ RUN_SEQ=$(date +%s)   # act always reports run 1
 {
   echo "GITHUB_RUN_NUMBER=$RUN_SEQ"
   echo "GITHUB_RUN_ID=$RUN_SEQ"
+  echo "GITHUB_OWNER=zbrainiac-labs"   # sql-validate.sh names the UnitTH package owner_repo
+  echo "GITHUB_REPO=spcs-rstudio"
 } > "$TMP/env"
+
+# spans are only exported with an OTLP endpoint (same as DataOpsBackbone local-ci/run.sh)
+if [[ -n "$(docker ps -q --filter label=com.docker.compose.service=otel-collector)" ]]; then
+  echo "OTEL_EXPORTER_OTLP_ENDPOINT=host.docker.internal:4317" >> "$TMP/env"
+  echo "Tracing via otel-collector: service spcs-rstudio in Grafana http://localhost:3000"
+fi
+
+# same report mounts as the compose runner, so results show up on http://localhost:8080
+mkdir -p "$BACKBONE/unitth-store" "$BACKBONE/sql-unit-reports"
+REPORT_MOUNTS="-v sql_unit_report:/home/docker/sql-report-vol -v $BACKBONE/unitth-store:/home/docker/unitth-store -v $BACKBONE/sql-unit-reports:/home/docker/sql-unit-reports"
 
 # --- run ----------------------------------------------------------------------
 LOG_DIR="$REPO/local-ci/logs"
@@ -93,7 +105,7 @@ act workflow_dispatch \
   --pull=false \
   --local-repository "zbrainiac-labs/DataOpsBackbone@main=$BACKBONE" \
   --network "$NETWORK" \
-  --container-options "-v $VOLUME:/sonar:ro" \
+  --container-options "-v $VOLUME:/sonar:ro $REPORT_MOUNTS" \
   --bind \
   --secret-file "$TMP/secrets" \
   --env-file "$TMP/env" \
