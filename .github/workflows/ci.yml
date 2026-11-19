@@ -274,7 +274,7 @@ jobs:
           scripts/render-spec.sh
       - name: Setup Snowflake connection
         if: env.DRY_RUN != 'true'
-        uses: zbrainiac-labs/DataOpsBackbone/.github/actions/snowflake-connect@main
+        uses: zbrainiac-labs/DataOpsBackbone/.github/actions/snowflake-connect@v1
         with:
           use_oidc: ${{ github.event.act != true }}
           snowflake_account: ${{ env.SNOWFLAKE_ACCOUNT }}
@@ -325,7 +325,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Setup Snowflake connection
-        uses: zbrainiac-labs/DataOpsBackbone/.github/actions/snowflake-connect@main
+        uses: zbrainiac-labs/DataOpsBackbone/.github/actions/snowflake-connect@v1
         with:
           use_oidc: ${{ github.event.act != true }}
           snowflake_account: ${{ env.SNOWFLAKE_ACCOUNT }}
